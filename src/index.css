@@ -1,0 +1,89 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Playfair+Display:wght@400;700;900&family=JetBrains+Mono:wght@400;700&family=Anton&family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500;1,600;1,700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Playfair Display", serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-display: "Anton", sans-serif;
+  --font-organic: "Cormorant Garamond", serif;
+}
+
+@layer base {
+  :root {
+    --radius-theme: 1rem;
+    --border-theme: 1px;
+    --shadow-theme: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+    --icon-stroke: 2px;
+    --bg-main: #f8fafc;
+    --accent-color: #059669;
+  }
+
+  /* Global Theme Application */
+  .rounded-xl, 
+  .rounded-2xl, 
+  .rounded-3xl, 
+  .rounded-\[2\.5rem\] {
+    border-radius: var(--radius-theme) !important;
+  }
+
+  .shadow-sm,
+  .shadow-md,
+  .shadow-lg,
+  .shadow-2xl {
+    box-shadow: var(--shadow-theme) !important;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #e2e8f0;
+    border-radius: 10px;
+  }
+  .dark .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #1e293b;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #cbd5e1;
+  }
+  .dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #334155;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  /* Compact Layout Overrides */
+  [data-layout="compact"] .p-4,
+  [data-layout="compact"] .p-6,
+  [data-layout="compact"] .p-8 {
+    padding: 0.5rem !important;
+  }
+  [data-layout="compact"] .space-y-6 > :not([hidden]) ~ :not([hidden]) {
+    margin-top: 0.75rem !important;
+  }
+  [data-layout="compact"] .space-y-8 > :not([hidden]) ~ :not([hidden]) {
+    margin-top: 1rem !important;
+  }
+  [data-layout="compact"] .rounded-xl {
+    border-radius: 0.75rem !important;
+  }
+  [data-layout="compact"] .rounded-2xl {
+    border-radius: 0.75rem !important;
+  }
+  [data-layout="compact"] .rounded-3xl {
+    border-radius: 1rem !important;
+  }
+  [data-layout="compact"] .rounded-\[2\.5rem\] {
+    border-radius: 1.5rem !important;
+  }
+}

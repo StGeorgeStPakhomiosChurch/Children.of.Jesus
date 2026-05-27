@@ -1,0 +1,10 @@
+{
+  "name": "Children of Jesus - أبناء يسوع",
+  "description": "نظام متكامل لإدارة بيانات المخدومين، متابعة الحضور، وتسجيل الملاحظات.",
+  "requestFramePermissions": [
+    "geolocation",
+    "camera",
+    "microphone",
+    "contacts"
+  ]
+}
