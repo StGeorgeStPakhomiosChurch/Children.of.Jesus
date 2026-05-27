@@ -11,9 +11,45 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // Middleware to parse JSON bodies with a reasonable limit for bulk syncs
+  app.use(express.json({ limit: '15mb' }));
+
   // API routes go here
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok", mode: process.env.NODE_ENV });
+  });
+
+  app.post("/api/sheets-sync", async (req, res) => {
+    const { webAppUrl, action, payload } = req.body;
+    
+    if (!webAppUrl) {
+      return res.status(400).json({ error: "Google Apps Script Web App URL is required" });
+    }
+
+    try {
+      const response = await fetch(webAppUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ action, ...payload }),
+      });
+
+      const dataText = await response.text();
+      let data;
+      try {
+        data = JSON.parse(dataText);
+      } catch {
+        data = { text: dataText };
+      }
+
+      res.json({ success: true, data });
+    } catch (error: any) {
+      console.error("Error in sheets-sync proxy:", error);
+      res.status(500).json({ 
+        error: error.message || "Failed to communicate with Google Apps Script. Please verify the URL." 
+      });
+    }
   });
 
   // Vite middleware for development

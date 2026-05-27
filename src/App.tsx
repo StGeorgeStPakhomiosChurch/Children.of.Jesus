@@ -14,6 +14,10 @@ import {
   XCircle, 
   Trash2, 
   Edit3, 
+  Database,
+  RefreshCw,
+  Copy,
+  ExternalLink,
   ChevronRight,
   ChevronLeft,
   LayoutDashboard,
@@ -50,6 +54,7 @@ import {
   Plane,
   DollarSign,
   Cake,
+  Gift,
   Bell,
   Eye,
   EyeOff,
@@ -203,7 +208,9 @@ export default function App() {
     fontFamily: 'sans' as 'sans' | 'serif' | 'mono',
     dateFormat: 'DD/MM/YYYY',
     timeFormat: '24h',
-    textColor: 'inherit'
+    textColor: 'inherit',
+    googleAppsScriptUrl: '',
+    autoSyncSheets: false
   });
 
   const t = (key: keyof typeof TRANSLATIONS['ar']) => {
@@ -212,6 +219,14 @@ export default function App() {
 
   const [showSettings, setShowSettings] = useState(false);
   const [showAgenda, setShowAgenda] = useState(false);
+  const [showSheetsSync, setShowSheetsSync] = useState(false);
+
+  // Google Sheets Sync state
+  const [isSyncingSheets, setIsSyncingSheets] = useState(false);
+  const [sheetsSyncError, setSheetsSyncError] = useState<string | null>(null);
+  const [sheetsSyncSuccess, setSheetsSyncSuccess] = useState<string | null>(null);
+  const [copiedCode, setCopiedCode] = useState(false);
+  const [activeSetupTab, setActiveSetupTab] = useState<'instructions' | 'scriptCode'>('instructions');
 
   // Form State
   const [formData, setFormData] = useState<Partial<Servant>>({
@@ -261,7 +276,12 @@ export default function App() {
       
       const savedSettings = localStorage.getItem('servant_app_settings');
       if (savedSettings) {
-        setSettings(JSON.parse(savedSettings));
+        try {
+          const parsed = JSON.parse(savedSettings);
+          setSettings(prev => ({ ...prev, ...parsed }));
+        } catch (e) {
+          console.error("Failed to parse settings", e);
+        }
       }
       
       const saved = localStorage.getItem(STORAGE_KEY);
@@ -286,6 +306,34 @@ export default function App() {
       console.error('Failed to save data to localStorage:', error);
     }
   }, [servants, attendance, trips, users, settings, serviceStructure]);
+
+  // Debounced Auto Sync to Google Sheets
+  useEffect(() => {
+    if (!settings.autoSyncSheets || !settings.googleAppsScriptUrl) return;
+    
+    const timer = setTimeout(() => {
+      fetch('/api/sheets-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          webAppUrl: settings.googleAppsScriptUrl,
+          action: 'sync_upload',
+          payload: { servants, attendance, trips }
+        })
+      })
+      .then(res => res.json())
+      .then(res => {
+        if (res.success) {
+          console.log("Auto-sync to Google Sheets synchronized!");
+        }
+      })
+      .catch(err => {
+        console.error("Auto-sync to Google Sheets failed:", err);
+      });
+    }, 5000);
+
+    return () => clearTimeout(timer);
+  }, [servants, attendance, trips, settings.autoSyncSheets, settings.googleAppsScriptUrl]);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -913,6 +961,34 @@ export default function App() {
     });
   }, [servants, currentUser]);
 
+  const birthdaysNext3Days = useMemo(() => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const threeDaysFromNow = new Date(today);
+    threeDaysFromNow.setDate(today.getDate() + 3);
+
+    return servants.filter(s => {
+      // Filter by user access
+      if (currentUser?.role !== 'admin' && currentUser?.role !== 'priest') {
+        const hasAccess = currentUser?.assignments.some(a => 
+          a.main === s.service && (a.sub === s.subService || a.role === 'service_leader')
+        );
+        if (!hasAccess) return false;
+      }
+
+      if (!s.birthDate) return false;
+      const bDate = new Date(s.birthDate);
+      const bMonth = bDate.getMonth();
+      const bDay = bDate.getDate();
+      
+      const thisYearBirthday = new Date(today.getFullYear(), bMonth, bDay);
+      const nextYearBirthday = new Date(today.getFullYear() + 1, bMonth, bDay);
+      
+      return (thisYearBirthday >= today && thisYearBirthday < threeDaysFromNow) ||
+             (nextYearBirthday >= today && nextYearBirthday < threeDaysFromNow);
+    });
+  }, [servants, currentUser]);
+
   const classServants = useMemo(() => {
     if (!selectedMain || !selectedSub) return [];
     
@@ -958,6 +1034,102 @@ export default function App() {
       return matchesGender && matchesSearch && matchesMonth;
     });
   }, [classServants, selectedGender, searchQuery, selectedBirthMonth]);
+
+  const handleSheetsSync = async (action: 'sync_upload' | 'sync_download') => {
+    if (!settings.googleAppsScriptUrl) {
+      setSheetsSyncError(
+        settings.language === 'ar' 
+          ? 'يرجى إدخال رابط Apps Script Web App أولاً' 
+          : 'Please enter Apps Script Web App URL first'
+      );
+      return;
+    }
+
+    setIsSyncingSheets(true);
+    setSheetsSyncError(null);
+    setSheetsSyncSuccess(null);
+
+    const payload = action === 'sync_upload' 
+      ? { servants, attendance, trips } 
+      : {};
+
+    try {
+      const response = await fetch('/api/sheets-sync', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          webAppUrl: settings.googleAppsScriptUrl,
+          action,
+          payload
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(result.error || result.data?.error || result.data?.message || 'Failed to sync');
+      }
+
+      if (action === 'sync_upload') {
+        setSheetsSyncSuccess(
+          settings.language === 'ar'
+            ? `تم رفع ومزامنة البيانات وتحديث الجدول بنجاح! ${result.data?.message || ''}`
+            : 'Data uploaded and Sheets synchronized successfully!'
+        );
+      } else if (action === 'sync_download') {
+        const { servants: downloadedServants, attendance: downloadedAttendance } = result.data || {};
+        
+        let updateCount = 0;
+        if (downloadedServants && Array.isArray(downloadedServants)) {
+          setServants(prev => {
+            const merged = [...prev];
+            downloadedServants.forEach((ds: any) => {
+              const idx = merged.findIndex(s => s.id === ds.id);
+              if (idx > -1) {
+                merged[idx] = { ...merged[idx], ...ds };
+              } else {
+                merged.push(ds);
+              }
+            });
+            updateCount = downloadedServants.length;
+            return merged;
+          });
+        }
+
+        if (downloadedAttendance && Array.isArray(downloadedAttendance)) {
+          setAttendance(prev => {
+            const merged = [...prev];
+            downloadedAttendance.forEach((da: any) => {
+              const idx = merged.findIndex(a => a.date === da.date);
+              if (idx > -1) {
+                merged[idx] = { ...merged[idx], records: { ...merged[idx].records, ...da.records } };
+              } else {
+                merged.push(da);
+              }
+            });
+            return merged;
+          });
+        }
+
+        setSheetsSyncSuccess(
+          settings.language === 'ar'
+            ? `تم استيراد البيانات من Google Sheets بنجاح! تم تحميل وتحديث ${updateCount} مخدوم.`
+            : `Data received and synchronized with local state! Updated ${updateCount} servants.`
+        );
+      }
+    } catch (err: any) {
+      console.error(err);
+      setSheetsSyncError(
+        settings.language === 'ar'
+          ? `حدث خطأ أثناء الاتصال بالجدول: ${err.message || 'تأكد من إعداد رابط الـ API ونشره للجميع (Anyone)'}`
+          : `Sync failed: ${err.message || 'Verify Web App deployment and settings'}`
+      );
+    } finally {
+      setIsSyncingSheets(false);
+    }
+  };
 
   // --- Renderers ---
   if (showSplash) {
@@ -1465,6 +1637,16 @@ export default function App() {
             </button>
             <button 
               onClick={() => {
+                setShowSheetsSync(true);
+                setIsSidebarOpen(false);
+              }}
+              className="w-full flex items-center gap-3 px-4 py-3 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/10 rounded-xl transition-all font-bold"
+            >
+              <Database size={18} />
+              <span className="text-sm">{settings.language === 'ar' ? 'مزامنة Google Sheets' : 'Sync Google Sheets'}</span>
+            </button>
+            <button 
+              onClick={() => {
                 setShowAgenda(true);
                 setIsSidebarOpen(false);
               }}
@@ -1592,6 +1774,130 @@ export default function App() {
                         );
                       })}
                     </div>
+                  </div>
+                </div>
+              )}
+
+              {birthdaysNext3Days.length > 0 && (
+                <div className="bg-white dark:bg-sky-950/20 dark:backdrop-blur-md p-6 rounded-[2.5rem] border border-slate-200 dark:border-sky-800/30 shadow-sm space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-100 dark:border-sky-800/20 pb-4">
+                    <div className="flex items-center gap-3">
+                      <div className="w-12 h-12 bg-rose-50 dark:bg-rose-950/40 text-rose-500 rounded-2xl flex items-center justify-center animate-pulse">
+                        <Gift size={24} />
+                      </div>
+                      <div>
+                        <h3 className="font-extrabold text-slate-800 dark:text-slate-100 text-base sm:text-lg">
+                          {settings.language === 'ar' ? 'أعياد الميلاد القادمة وحالات التهنئة (الـ 3 أيام القادمة)' : 'Upcoming Birthdays & Greetings (Next 3 Days)'}
+                        </h3>
+                        <p className="text-xs text-slate-400 dark:text-slate-500">
+                          {settings.language === 'ar' 
+                            ? `هناك ${birthdaysNext3Days.length} من المخدومين يحتفلون بعيد ميلادهم قريباً. تواصل معهم للمعايدة والتهنئة!` 
+                            : `There are ${birthdaysNext3Days.length} servants celebrating their birthdays soon. Greet them!`}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <div className="divide-y divide-slate-100 dark:divide-sky-800/20">
+                    {birthdaysNext3Days.map(s => {
+                      const bDate = new Date(s.birthDate!);
+                      const today = new Date();
+                      today.setHours(0, 0, 0, 0);
+
+                      const bThisYear = new Date(today.getFullYear(), bDate.getMonth(), bDate.getDate());
+                      const bNextYear = new Date(today.getFullYear() + 1, bDate.getMonth(), bDate.getDate());
+                      const targetBirthday = (bThisYear >= today) ? bThisYear : bNextYear;
+                      
+                      const diffTime = targetBirthday.getTime() - today.getTime();
+                      const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
+                      
+                      let dayLabel = '';
+                      if (settings.language === 'ar') {
+                        if (diffDays === 0) dayLabel = 'اليوم 🎉';
+                        else if (diffDays === 1) dayLabel = 'غداً 🎂';
+                        else if (diffDays === 2) dayLabel = 'بعد غد 🎈';
+                        else dayLabel = `خلال ${diffDays} أيام`;
+                      } else {
+                        if (diffDays === 0) dayLabel = 'Today 🎉';
+                        else if (diffDays === 1) dayLabel = 'Tomorrow 🎂';
+                        else if (diffDays === 2) dayLabel = 'In 2 days 🎈';
+                        else dayLabel = `In ${diffDays} days`;
+                      }
+                      
+                      const phone = s.phone || s.whatsapp || s.father?.phone || s.mother?.phone;
+                      const mainServiceLabel = SERVICE_STRUCTURE[s.service as keyof typeof SERVICE_STRUCTURE]?.label || s.service;
+                      
+                      return (
+                        <div key={s.id} className="py-4 flex flex-col md:flex-row md:items-center justify-between gap-4 first:pt-0 last:pb-0">
+                          <button 
+                            onClick={() => { setSelectedServant(s); setView('details'); }}
+                            className="flex items-center gap-3 text-right hover:opacity-85 transition-opacity duration-150 w-full md:w-auto"
+                          >
+                            <div className="relative flex-shrink-0">
+                              {s.photo ? (
+                                <img src={s.photo} alt={s.name} className="w-12 h-12 rounded-full object-cover border-2 border-slate-100 dark:border-sky-800/30" />
+                              ) : (
+                                <div className="w-12 h-12 bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 rounded-full flex items-center justify-center font-bold text-base">
+                                  {s.name.charAt(0)}
+                                </div>
+                              )}
+                              <div className="absolute -bottom-1 -right-1 bg-rose-500 text-white p-1 rounded-full text-[8px]">
+                                <Cake size={8} />
+                              </div>
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <h4 className="font-bold text-slate-800 dark:text-slate-100 text-sm sm:text-base">
+                                  {s.name}
+                                </h4>
+                                <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${
+                                  diffDays === 0 
+                                    ? 'bg-rose-100 dark:bg-rose-950/50 text-rose-600 dark:text-rose-400 animate-pulse' 
+                                    : 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400'
+                                }`}>
+                                  {dayLabel}
+                                </span>
+                              </div>
+                              <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
+                                {mainServiceLabel} - {s.subService} {s.birthDate && `(${formatDate(s.birthDate)})`}
+                              </p>
+                            </div>
+                          </button>
+                          
+                          <div className="flex items-center gap-2 self-start xs:self-end md:self-auto flex-shrink-0">
+                            {phone ? (
+                              <>
+                                <button
+                                  onClick={() => window.open(`tel:${phone}`)}
+                                  className="px-4 py-2.5 bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 rounded-2xl hover:bg-blue-100 dark:hover:bg-blue-900/40 transition-all flex items-center gap-1.5 text-xs font-bold"
+                                  title={settings.language === 'ar' ? 'اتصال هاتفى' : 'Direct Call'}
+                                >
+                                  <Phone size={14} />
+                                  <span>{settings.language === 'ar' ? 'اتصال' : 'Call'}</span>
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    const greetingMsg = settings.language === 'ar' 
+                                      ? `كل سنة وأنت طيب وبأحسن حال يا ${s.name.split(' ')[0]}! 🎉🎂 حابين نهنيك ونطمن عليك بمناسبة عيد ميلادك، ونتمنى لك سنة مباركة مليانة بالفرح والبركة والنجاح في حياتك ومع ربنا. ربنا يحافظ عليك ويبارك فيك.`
+                                      : `Happy Birthday, ${s.name.split(' ')[0]}! 🎉🎂 Wishing you a wonderful year filled with joy, blessings, and success in everything you do.`;
+                                    window.open(`https://wa.me/2${phone}?text=${encodeURIComponent(greetingMsg)}`, '_blank');
+                                  }}
+                                  className="px-4 py-2.5 bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 rounded-2xl hover:bg-emerald-100 dark:hover:bg-emerald-900/40 transition-all flex items-center gap-1.5 text-xs font-bold"
+                                  title={settings.language === 'ar' ? 'تهنئة واتساب' : 'Send Greet'}
+                                >
+                                  <MessageSquare size={14} />
+                                  <span>{settings.language === 'ar' ? 'تهنئة واتساب' : 'WhatsApp'}</span>
+                                </button>
+                              </>
+                            ) : (
+                              <span className="text-xs text-slate-400 dark:text-slate-500 font-medium bg-slate-50 dark:bg-slate-900/40 px-3 py-2 rounded-xl border border-slate-100 dark:border-sky-900/20">
+                                {settings.language === 'ar' ? 'لا يوجد رقم هاتف متاح' : 'No phone number'}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -3849,6 +4155,508 @@ export default function App() {
                 >
                   {newServiceForm.type === 'main' ? (newServiceForm.id ? 'حفظ التعديلات' : 'إنشاء الخدمة الرئيسية') : (newServiceForm.id ? 'حفظ التعديلات' : 'إضافة الخدمة الفرعية')}
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Google Sheets Sync Modal */}
+        {showSheetsSync && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4" dir={settings.language === 'ar' ? 'rtl' : 'ltr'}>
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => {
+                setShowSheetsSync(false);
+                setSheetsSyncError(null);
+                setSheetsSyncSuccess(null);
+              }}
+              className="absolute inset-0 bg-black/60 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="relative bg-white dark:bg-slate-950 w-full max-w-2xl rounded-[2.5rem] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              {/* Header */}
+              <div className="p-8 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center bg-gradient-to-r from-emerald-600 to-teal-600 text-white">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-white/10 rounded-xl backdrop-blur-sm">
+                    <Database size={24} />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-black">
+                      {settings.language === 'ar' ? 'ربط ومزامنة Google Sheets' : 'Google Sheets Sync'}
+                    </h2>
+                    <p className="text-xs text-emerald-100 mt-1">
+                      {settings.language === 'ar' ? 'احفظ بياناتك وتحديثاتك مباشرة في جدول بيانات جوجل الخاص بك' : 'Store and sync your data directly in your favorite Google Spreadsheet'}
+                    </p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => {
+                    setShowSheetsSync(false);
+                    setSheetsSyncError(null);
+                    setSheetsSyncSuccess(null);
+                  }} 
+                  className="p-2 hover:bg-white/20 rounded-full transition-colors text-white"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+
+              {/* Scrollable Container */}
+              <div className="flex-1 overflow-y-auto p-8 space-y-6">
+                
+                {/* Configuration URL Card */}
+                <div className="p-6 bg-slate-50 dark:bg-slate-900 rounded-[2rem] border border-slate-100 dark:border-slate-850 space-y-4">
+                  <h3 className="text-sm font-bold text-slate-800 dark:text-slate-200">
+                    {settings.language === 'ar' ? '⚙️ إعدادات الاتصال بـ Google Apps Script' : '⚙️ Connection Settings'}
+                  </h3>
+                  
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-400 block">
+                      {settings.language === 'ar' ? 'رابط تطبيق Apps Script Web App (API URL):' : 'Apps Script Web App API URL:'}
+                    </label>
+                    <input 
+                      type="url"
+                      value={settings.googleAppsScriptUrl}
+                      onChange={(e) => setSettings({ ...settings, googleAppsScriptUrl: e.target.value })}
+                      placeholder="https://script.google.com/macros/s/.../exec"
+                      dir="ltr"
+                      className="w-full px-4 py-3 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl outline-none focus:border-emerald-500 font-mono text-xs text-emerald-600 dark:text-emerald-400"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between pt-2">
+                    <div>
+                      <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                        {settings.language === 'ar' ? 'المزامنة التلقائية للبيانات بعد التعديلات' : 'Auto sync data changes'}
+                      </span>
+                      <p className="text-[10px] text-slate-450 dark:text-slate-505">
+                        {settings.language === 'ar' ? 'سيقوم تلقائياً برفع البيانات لتظل دائماً محدثة في الجدول' : 'Will automatically push updates as changes occur'}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setSettings({ ...settings, autoSyncSheets: !settings.autoSyncSheets })}
+                      className={`relative w-12 h-6 rounded-full p-0.5 transition-colors duration-200 ease-in-out ${settings.autoSyncSheets ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-700'}`}
+                    >
+                      <div className={`w-5 h-5 bg-white rounded-full transition-transform duration-200 ease-in-out ${settings.autoSyncSheets ? (settings.language === 'ar' ? '-translate-x-6' : 'translate-x-6') : 'translate-x-0'}`} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Status Banners */}
+                {sheetsSyncError && (
+                  <div className="p-4 bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400 rounded-2xl border border-red-100 dark:border-red-950/30 flex items-start gap-3">
+                    <AlertCircle size={20} className="flex-shrink-0 mt-0.5" />
+                    <p className="text-xs font-bold leading-relaxed">{sheetsSyncError}</p>
+                  </div>
+                )}
+
+                {sheetsSyncSuccess && (
+                  <div className="p-4 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 rounded-2xl border border-emerald-100 dark:border-emerald-950/30 flex items-start gap-3">
+                    <CheckCircle2 size={20} className="flex-shrink-0 mt-0.5" />
+                    <p className="text-xs font-bold leading-relaxed">{sheetsSyncSuccess}</p>
+                  </div>
+                )}
+
+                {/* Sync Action Buttons */}
+                <div className="grid grid-cols-2 gap-4">
+                  <button
+                    disabled={isSyncingSheets || !settings.googleAppsScriptUrl}
+                    onClick={() => handleSheetsSync('sync_upload')}
+                    className="p-5 bg-gradient-to-br from-emerald-600 to-teal-600 text-white rounded-[2rem] hover:opacity-90 transition-all font-black text-sm flex flex-col items-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed shadow-md cursor-pointer"
+                  >
+                    {isSyncingSheets ? (
+                      <RefreshCw className="animate-spin text-white" size={24} />
+                    ) : (
+                      <Upload size={24} />
+                    )}
+                    <div className="text-center">
+                      <p className="font-extrabold">{settings.language === 'ar' ? 'رفع وتحديث الجدول' : 'Upload & Sync Out'}</p>
+                      <p className="text-[10px] text-emerald-100 font-medium mt-1">
+                        {settings.language === 'ar' ? 'حفظ البيانات المحلية إلى Sheet' : 'Save local state to Spreadsheet'}
+                      </p>
+                    </div>
+                  </button>
+
+                  <button
+                    disabled={isSyncingSheets || !settings.googleAppsScriptUrl}
+                    onClick={() => handleSheetsSync('sync_download')}
+                    className="p-5 bg-gradient-to-br from-blue-600 to-sky-600 text-white rounded-[2rem] hover:opacity-90 transition-all font-black text-sm flex flex-col items-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed shadow-md cursor-pointer"
+                  >
+                    {isSyncingSheets ? (
+                      <RefreshCw className="animate-spin text-white" size={24} />
+                    ) : (
+                      <DownloadCloud size={24} />
+                    )}
+                    <div className="text-center">
+                      <p className="font-extrabold">{settings.language === 'ar' ? 'تحميل واستيراد البيانات' : 'Download & Sync In'}</p>
+                      <p className="text-[10px] text-blue-100 font-medium mt-1">
+                        {settings.language === 'ar' ? 'استعادة البيانات من Sheet وحفظها' : 'Pull all data from Spreadsheet'}
+                      </p>
+                    </div>
+                  </button>
+                </div>
+
+                {/* Setup Steps Accordion / Instructions */}
+                <div className="border border-slate-100 dark:border-slate-800 rounded-3xl overflow-hidden bg-slate-50 dark:bg-slate-900/50">
+                  <div className="flex border-b border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900">
+                    <button
+                      type="button"
+                      onClick={() => setActiveSetupTab('instructions')}
+                      className={`flex-1 py-3 text-xs font-bold transition-all ${activeSetupTab === 'instructions' ? 'bg-white dark:bg-slate-950 text-emerald-600 border-b-2 border-emerald-600' : 'text-slate-450 hover:text-slate-600'}`}
+                    >
+                      {settings.language === 'ar' ? '📋 خطوات الإعداد بالتفصيل' : '📋 Setup Steps'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveSetupTab('scriptCode')}
+                      className={`flex-1 py-3 text-xs font-bold transition-all ${activeSetupTab === 'scriptCode' ? 'bg-white dark:bg-slate-950 text-emerald-600 border-b-2 border-emerald-600' : 'text-slate-450 hover:text-slate-600'}`}
+                    >
+                      {settings.language === 'ar' ? '💻 كود البرمجة (Apps Script)' : '💻 Source Code'}
+                    </button>
+                  </div>
+
+                  <div className="p-6 bg-white dark:bg-slate-950 space-y-4">
+                    {activeSetupTab === 'instructions' ? (
+                      <div className="text-xs leading-relaxed space-y-3 text-slate-600 dark:text-slate-400">
+                        {settings.language === 'ar' ? (
+                          <>
+                            <p className="font-black text-slate-800 dark:text-slate-200">خطوات تشغيل وربط جدول جوجل (Google Sheet):</p>
+                            <ol className="list-decimal list-inside space-y-2 text-right">
+                              <li>أنشئ ملف <strong className="text-emerald-600">Google Sheet</strong> جديد.</li>
+                              <li>من القائمة العلوية، اختر <strong className="text-slate-800 dark:text-white">Extensions (الامتدادات)</strong> ثم اضغط على <strong className="text-blue-500">Apps Script</strong>.</li>
+                              <li>قم بمسح أي كود موجود هناك، ثم انسخ كود البرمجة الموجود في تفاصيل التبويب الثاني <strong className="text-emerald-500">(كود البرمجة)</strong> والصقه بالكامل.</li>
+                              <li>اضغط على رمز الحفظ (أو <strong>Ctrl + S</strong>).</li>
+                              <li>اضغط على زر <strong className="text-slate-800 dark:text-white">Deploy (نشر)</strong> بالأعلى ثم <strong className="text-emerald-600">New deployment (نشر جديد)</strong>.</li>
+                              <li>اضغط على ترس الإعدادات واختر <strong className="text-slate-800 dark:text-white">Web app (تطبيق ويب)</strong>.</li>
+                              <li><strong>هام جداً للتفعيل السليم:</strong> تأكد من ضبط الإعدادات كالتالي:
+                                <ul className="list-disc list-inside mr-6 mt-1 space-y-1 text-slate-500">
+                                  <li><strong>Execute as:</strong> اضبطها على <strong className="text-blue-500">Me (أنا)</strong>.</li>
+                                  <li><strong>Who has access:</strong> اضبطها على <strong className="text-emerald-600">Anyone (أي شخص / الجميع)</strong>.</li>
+                                </ul>
+                              </li>
+                              <li>اضغط على زر <strong className="text-blue-600 font-bold">Deploy (نشر)</strong> وموافقة على الصلاحيات المطلوبة.</li>
+                              <li>انسخ الرابط الذي سيظهر لك وضعه في حقل "API URL" في الأعلى!</li>
+                            </ol>
+                          </>
+                        ) : (
+                          <>
+                            <p className="font-black text-slate-800 dark:text-slate-200">How to Setup and Connect Google Sheet:</p>
+                            <ol className="list-decimal list-inside space-y-2 text-left" dir="ltr">
+                              <li>Create a new empty <strong className="text-emerald-600">Google Sheet</strong>.</li>
+                              <li>Go to top menu and click <strong className="text-slate-800 dark:text-white">Extensions</strong> -&gt; <strong className="text-blue-500">Apps Script</strong>.</li>
+                              <li>Delete all existing placeholder code, then copy the script from the second tab and paste it inside.</li>
+                              <li>Save the file (<strong className="text-slate-800 dark:text-white">Ctrl + S</strong>).</li>
+                              <li>Click <strong className="text-slate-800 dark:text-white">Deploy</strong> button at top-right, and select <strong className="text-emerald-650">New deployment</strong>.</li>
+                              <li>Under select type, choose <strong className="text-blue-500">Web app</strong>.</li>
+                              <li>Configure accessibility headers carefully:
+                                <ul className="list-disc list-inside ml-6 mt-1 space-y-1">
+                                  <li><strong>Execute as:</strong> <strong className="text-blue-500">Me</strong></li>
+                                  <li><strong>Who has access:</strong> <strong className="text-emerald-600">Anyone</strong></li>
+                                </ul>
+                              </li>
+                              <li>Click <strong className="text-blue-600">Deploy</strong> and grant necessary Google Account permissions.</li>
+                              <li>Copy the generated <strong className="text-slate-800 dark:text-white">Web App URL</strong> and paste it in the configuration input above.</li>
+                            </ol>
+                          </>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="font-bold text-slate-450 dark:text-slate-400">
+                            {settings.language === 'ar' ? 'كود Apps Script البرمجي (انسخه وضعه بالكامل في محرر جوجل)' : 'Copy and Paste this script completely inside Google Apps Script editor'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const scriptText = `// Google Apps Script Code - Paste in your Spreadsheet App Script Editor
+function doPost(e) {
+  try {
+    var requestData = JSON.parse(e.postData.contents);
+    var action = requestData.action;
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    
+    if (action === "sync_upload") {
+      // 1. Write Servants Sheet
+      var servantsSheet = ss.getSheetByName("المخدومين") || ss.insertSheet("المخدومين");
+      servantsSheet.clear();
+      
+      // Set headers
+      var servantHeaders = [
+        "الرقم التعريفي (ID)", "الاسم بالكامل", "النوع", "تاريخ الميلاد", "رقم التليفون", 
+        "رقم واتساب", "العنوان", "الخدمة الرئيسية", "الخدمة الفرعية / الفصل", 
+        "أب الاعتراف", "اسم الأب", "تليفون الأب", "اسم الأم", "تليفون الأم", "ملاحظات"
+      ];
+      servantsSheet.appendRow(servantHeaders);
+      
+      var servants = requestData.servants || [];
+      if (servants.length > 0) {
+        var servantRows = servants.map(function(s) {
+          return [
+            s.id || "",
+            s.name || "",
+            s.gender === "male" ? "ذكر" : "أنثى",
+            s.birthDate || "",
+            s.phone || "",
+            s.whatsapp || "",
+            s.address || "",
+            s.service || "",
+            s.subService || "",
+            s.confession || "",
+            s.father?.name || "",
+            s.father?.phone || "",
+            s.mother?.name || "",
+            s.mother?.phone || "",
+            s.notes || ""
+          ];
+        });
+        
+        servantsSheet.getRange(2, 1, servantRows.length, servantHeaders.length).setValues(servantRows);
+      }
+      
+      // 2. Write Attendance Sheet
+      var attendanceSheet = ss.getSheetByName("تسجيل الحضور") || ss.insertSheet("تسجيل الحضور");
+      attendanceSheet.clear();
+      
+      var attendanceHeaders = [
+        "التاريخ", "رقم المخدوم (ID)", "اسم المخدوم", "الفصل", "حضور القداس", "حضور الخدمة"
+      ];
+      attendanceSheet.appendRow(attendanceHeaders);
+      
+      var attendance = requestData.attendance || [];
+      var attendanceRows = [];
+      
+      var servantMap = {};
+      servants.forEach(function(s) {
+        servantMap[s.id] = { name: s.name, sub: s.subService };
+      });
+      
+      attendance.forEach(function(record) {
+        var date = record.date;
+        var rMap = record.records || {};
+        Object.keys(rMap).forEach(function(servantId) {
+          var sInfo = servantMap[servantId] || { name: "غير معروف", sub: "" };
+          var r = rMap[servantId];
+          attendanceRows.push([
+            date,
+            servantId,
+            sInfo.name,
+            sInfo.sub,
+            r.mass ? "نعم" : "لا",
+            r.service ? "نعم" : "لا"
+          ]);
+        });
+      });
+      
+      if (attendanceRows.length > 0) {
+        attendanceSheet.getRange(2, 1, attendanceRows.length, attendanceHeaders.length).setValues(attendanceRows);
+      }
+      
+      return ContentService.createTextOutput(JSON.stringify({ 
+        success: true, 
+        message: "تم رفع البيانات بنجاح لـ " + servants.length + " مخدوم و " + attendanceRows.length + " سجلات حضور." 
+      })).setMimeType(ContentService.MimeType.JSON);
+    } 
+    
+    if (action === "sync_download") {
+      var ss = SpreadsheetApp.getActiveSpreadsheet();
+      var servantsSheet = ss.getSheetByName("المخدومين");
+      
+      if (!servantsSheet) {
+        return ContentService.createTextOutput(JSON.stringify({ 
+          success: false, 
+          message: "لم يتم العثور على ورقة 'المخدومين'. قم بطلب الرفع أولاً لإنشاء الجدول." 
+        })).setMimeType(ContentService.MimeType.JSON);
+      }
+      
+      var servantValues = servantsSheet.getDataRange().getValues();
+      var headers = servantValues[0];
+      var servants = [];
+      
+      for (var i = 1; i < servantValues.length; i++) {
+        var row = servantValues[i];
+        if (!row[0]) continue;
+        
+        servants.push({
+          id: String(row[0]),
+          name: String(row[1] || ""),
+          gender: row[2] === "أنثى" ? "female" : "male",
+          birthDate: String(row[3] || ""),
+          phone: String(row[4] || ""),
+          whatsapp: String(row[5] || ""),
+          address: String(row[6] || ""),
+          service: String(row[7] || ""),
+          subService: String(row[8] || ""),
+          confession: String(row[9] || ""),
+          father: {
+            name: String(row[10] || ""),
+            phone: String(row[11] || "")
+          },
+          mother: {
+            name: String(row[12] || ""),
+            phone: String(row[13] || "")
+          },
+          notes: String(row[14] || "")
+        });
+      }
+      
+      var attendanceSheet = ss.getSheetByName("تسجيل الحضور");
+      var attendance = [];
+      if (attendanceSheet) {
+        var attendanceValues = attendanceSheet.getDataRange().getValues();
+        var attByDate = {};
+        
+        for (var i = 1; i < attendanceValues.length; i++) {
+          var row = attendanceValues[i];
+          var date = String(row[0] || "");
+          var servantId = String(row[1] || "");
+          var massAtt = row[4] === "نعم";
+          var serviceAtt = row[5] === "نعم";
+          
+          if (!date || !servantId) continue;
+          
+          if (!attByDate[date]) {
+            attByDate[date] = {};
+          }
+          attByDate[date][servantId] = { mass: massAtt, service: serviceAtt };
+        }
+        
+        Object.keys(attByDate).forEach(function(date) {
+          attendance.push({
+            date: date,
+            records: attByDate[date]
+          });
+        });
+      }
+      
+      return ContentService.createTextOutput(JSON.stringify({ 
+        success: true, 
+        servants: servants,
+        attendance: attendance
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    return ContentService.createTextOutput(JSON.stringify({ success: false, message: "أمر غير معروف" }))
+      .setMimeType(ContentService.MimeType.JSON);
+      
+  } catch (error) {
+    return ContentService.createTextOutput(JSON.stringify({ success: false, error: error.toString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function doGet(e) {
+  return ContentService.createTextOutput("Google Apps Script Web App for Church Attendance is running! URL configured correctly.")
+    .setMimeType(ContentService.MimeType.TEXT);
+}`;
+                              navigator.clipboard.writeText(scriptText);
+                              setCopiedCode(true);
+                              setTimeout(() => setCopiedCode(false), 2000);
+                            }}
+                            className="px-3 py-1.5 bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 rounded-xl hover:bg-emerald-100 dark:hover:bg-emerald-900/60 transition-all font-bold flex items-center gap-1"
+                          >
+                            <Copy size={12} />
+                            <span>{copiedCode ? (settings.language === 'ar' ? 'تم النسخ!' : 'Copied!') : (settings.language === 'ar' ? 'نسخ كود البرمجة الكلي' : 'Copy Code')}</span>
+                          </button>
+                        </div>
+                        <pre className="p-4 bg-slate-950 text-emerald-400 font-mono text-[9px] overflow-x-auto rounded-2xl max-h-56 border border-slate-800" dir="ltr text-left">
+{`function doPost(e) {
+  try {
+    var requestData = JSON.parse(e.postData.contents);
+    var action = requestData.action;
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    
+    if (action === "sync_upload") {
+      var servantsSheet = ss.getSheetByName("المخدومين") || ss.insertSheet("المخدومين");
+      servantsSheet.clear();
+      var servantHeaders = ["الرقم التعريفي (ID)", "الاسم بالكامل", "النوع", "تاريخ الميلاد", "رقم التليفون", "رقم واتساب", "العنوان", "الخدمة الرئيسية", "الخدمة الفرعية / الفصل", "أب الاعتراف", "اسم الأب", "تليفون الأب", "اسم الأم", "تليفون الأم", "ملاحظات"];
+      servantsSheet.appendRow(servantHeaders);
+      
+      var servants = requestData.servants || [];
+      if (servants.length > 0) {
+        var servantRows = servants.map(function(s) {
+          return [s.id||"", s.name||"", s.gender==="male"?"ذكر":"أنثى", s.birthDate||"", s.phone||"", s.whatsapp||"", s.address||"", s.service||"", s.subService||"", s.confession||"", s.father?.name||"", s.father?.phone||"", s.mother?.name||"", s.mother?.phone||"", s.notes||""];
+        });
+        servantsSheet.getRange(2, 1, servantRows.length, servantHeaders.length).setValues(servantRows);
+      }
+      
+      var attendanceSheet = ss.getSheetByName("تسجيل الحضور") || ss.insertSheet("تسجيل الحضور");
+      attendanceSheet.clear();
+      var attendanceHeaders = ["التاريخ", "رقم المخدوم (ID)", "اسم المخدوم", "الفصل", "حضور القداس", "حضور الخدمة"];
+      attendanceSheet.appendRow(attendanceHeaders);
+      
+      var attendance = requestData.attendance || [];
+      var attendanceRows = [];
+      var servantMap = {};
+      servants.forEach(function(s) { servantMap[s.id] = { name: s.name, sub: s.subService }; });
+      
+      attendance.forEach(function(record) {
+        var date = record.date;
+        var rMap = record.records || {};
+        Object.keys(rMap).forEach(function(servantId) {
+          var sInfo = servantMap[servantId] || { name: "غير معروف", sub: "" };
+          var r = rMap[servantId];
+          attendanceRows.push([date, servantId, sInfo.name, sInfo.sub, r.mass?"نعم":"لا", r.service?"نعم":"لا"]);
+        });
+      });
+      if (attendanceRows.length > 0) {
+        attendanceSheet.getRange(2, 1, attendanceRows.length, attendanceHeaders.length).setValues(attendanceRows);
+      }
+      return ContentService.createTextOutput(JSON.stringify({ success: true, message: "تمت المزامنة لـ "+servants.length+" مخدومين." })).setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    if (action === "sync_download") {
+      var ss = SpreadsheetApp.getActiveSpreadsheet();
+      var servantsSheet = ss.getSheetByName("المخدومين");
+      if (!servantsSheet) return ContentService.createTextOutput(JSON.stringify({ success: false, message: "لا توجد ورقة 'المخدومين'." })).setMimeType(ContentService.MimeType.JSON);
+      
+      var servantValues = servantsSheet.getDataRange().getValues();
+      var servants = [];
+      for (var i = 1; i < servantValues.length; i++) {
+        var row = servantValues[i];
+        if (!row[0]) continue;
+        servants.push({
+          id: String(row[0]), name: String(row[1]||""), gender: row[2]==="أنثى"?"female":"male",
+          birthDate: String(row[3]||""), phone: String(row[4]||""), whatsapp: String(row[5]||""),
+          address: String(row[6]||""), service: String(row[7]||""), subService: String(row[8]||""),
+          confession: String(row[9]||""), father: { name: String(row[10]||""), phone: String(row[11]||"") },
+          mother: { name: String(row[12]||""), phone: String(row[13]||"") }, notes: String(row[14]||"")
+        });
+      }
+      
+      var attendanceSheet = ss.getSheetByName("تسجيل الحضور");
+      var attendance = [];
+      if (attendanceSheet) {
+        var attendanceValues = attendanceSheet.getDataRange().getValues();
+        var attByDate = {};
+        for (var i = 1; i < attendanceValues.length; i++) {
+          var row = attendanceValues[i];
+          var date = String(row[0]||""), servantId = String(row[1]||"");
+          if (!date || !servantId) continue;
+          if (!attByDate[date]) attByDate[date] = {};
+          attByDate[date][servantId] = { mass: row[4]==="نعم", service: row[5]==="نعم" };
+        }
+        Object.keys(attByDate).forEach(function(d) { attendance.push({ date: d, records: attByDate[d] }); });
+      }
+      return ContentService.createTextOutput(JSON.stringify({ success: true, servants: servants, attendance: attendance })).setMimeType(ContentService.MimeType.JSON);
+    }
+    return ContentService.createTextOutput(JSON.stringify({ success: false, message: "أمر غير معروف" })).setMimeType(ContentService.MimeType.JSON);
+  } catch(error) {
+    return ContentService.createTextOutput(JSON.stringify({ success: false, error: error.toString() })).setMimeType(ContentService.MimeType.JSON);
+  }
+}`}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
               </div>
             </motion.div>
           </div>
