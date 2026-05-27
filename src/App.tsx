@@ -307,11 +307,12 @@ export default function App() {
     }
   }, [servants, attendance, trips, users, settings, serviceStructure]);
 
-  // Debounced Auto Sync to Google Sheets
+  // Debounced Auto Sync to Google Sheets with Static Fallback
   useEffect(() => {
     if (!settings.autoSyncSheets || !settings.googleAppsScriptUrl) return;
     
     const timer = setTimeout(() => {
+      // First try proxy
       fetch('/api/sheets-sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -321,14 +322,39 @@ export default function App() {
           payload: { servants, attendance, trips }
         })
       })
-      .then(res => res.json())
+      .then(res => {
+        if (!res.ok) throw new Error("Proxy response not ok");
+        return res.json();
+      })
       .then(res => {
         if (res.success) {
-          console.log("Auto-sync to Google Sheets synchronized!");
+          console.log("Auto-sync to Google Sheets synchronized via proxy!");
+        } else {
+          throw new Error(res.error || "Proxy returned unsuccessful status");
         }
       })
       .catch(err => {
-        console.error("Auto-sync to Google Sheets failed:", err);
+        console.warn("Auto-sync proxy failed, attempting direct client-to-sheets sync...", err);
+        // Fallback to direct client-side fetch (perfect for static environments like GitHub Pages)
+        fetch(settings.googleAppsScriptUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            action: 'sync_upload',
+            servants,
+            attendance,
+            trips
+          })
+        })
+        .then(res => res.json())
+        .then(res => {
+          if (res.success) {
+            console.log("Auto-sync to Google Sheets synchronized directly!");
+          }
+        })
+        .catch(directErr => {
+          console.error("Direct auto-sync to Google Sheets failed:", directErr);
+        });
       });
     }, 5000);
 
@@ -1053,7 +1079,10 @@ export default function App() {
       ? { servants, attendance, trips } 
       : {};
 
+    let result: any = null;
+
     try {
+      // 1. Try fetching via the Node Express backend proxy
       const response = await fetch('/api/sheets-sync', {
         method: 'POST',
         headers: {
@@ -1066,12 +1095,59 @@ export default function App() {
         }),
       });
 
-      const result = await response.json();
-
-      if (!response.ok || !result.success) {
-        throw new Error(result.error || result.data?.error || result.data?.message || 'Failed to sync');
+      const parsed = await response.json();
+      if (response.ok && parsed.success) {
+        result = parsed;
+      } else {
+        throw new Error(parsed.error || parsed.data?.error || parsed.data?.message || 'Proxy request returned failure status');
       }
+    } catch (err: any) {
+      console.warn("Backend proxy server failed or is not available. Falling back to direct client-side request...", err);
+      
+      try {
+        // 2. Fallback to direct fetch to Google Apps Script
+        // We use text/plain to avoid preflight OPTIONS CORS errors on static sites (like GitHub Pages)
+        const directResponse = await fetch(settings.googleAppsScriptUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'text/plain;charset=utf-8',
+          },
+          body: JSON.stringify({
+            action,
+            ...payload
+          }),
+        });
 
+        const text = await directResponse.text();
+        let directParsed;
+        try {
+          directParsed = JSON.parse(text);
+        } catch {
+          directParsed = { text };
+        }
+
+        if (directResponse.ok && (directParsed.success || directParsed.servants || directParsed.message)) {
+          result = {
+            success: true,
+            data: directParsed
+          };
+        } else {
+          throw new Error(directParsed.error || directParsed.message || 'Direct Google Apps Script request failed');
+        }
+      } catch (directErr: any) {
+        console.error("Direct sheet sync failed:", directErr);
+        setSheetsSyncError(
+          settings.language === 'ar'
+            ? `فشل الاتصال بالجدول (حتى عبر الاتصال المباشر): ${directErr.message || 'يرجى مراجعة إعدادات النشر وموافقة الصلاحيات'}`
+            : `Sync failed (even via direct connection): ${directErr.message || 'Please check deployment configurations'}`
+        );
+        setIsSyncingSheets(false);
+        return;
+      }
+    }
+
+    // Process the successful result
+    try {
       if (action === 'sync_upload') {
         setSheetsSyncSuccess(
           settings.language === 'ar'
@@ -1123,8 +1199,8 @@ export default function App() {
       console.error(err);
       setSheetsSyncError(
         settings.language === 'ar'
-          ? `حدث خطأ أثناء الاتصال بالجدول: ${err.message || 'تأكد من إعداد رابط الـ API ونشره للجميع (Anyone)'}`
-          : `Sync failed: ${err.message || 'Verify Web App deployment and settings'}`
+          ? `حدث خطأ أثناء معالجة بيانات المزامنة: ${err.message}`
+          : `Error processing sync data: ${err.message}`
       );
     } finally {
       setIsSyncingSheets(false);
